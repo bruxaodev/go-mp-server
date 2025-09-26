@@ -3,7 +3,7 @@ package main
 import (
 	"encoding/json"
 
-	"github.com/bruxaodev/go-mp-sdk/pkg/server"
+	"github.com/bruxaodev/go-mp-server/pkg/server"
 )
 
 type Client struct {

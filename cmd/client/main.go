@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bruxaodev/go-mp-sdk/pkg/server"
+	"github.com/bruxaodev/go-mp-server/pkg/server"
 	"github.com/quic-go/quic-go"
 )
 

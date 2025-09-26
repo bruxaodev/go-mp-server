@@ -1,4 +1,4 @@
-module github.com/bruxaodev/go-mp-sdk
+module github.com/bruxaodev/go-mp-server
 
 go 1.25.0
 
