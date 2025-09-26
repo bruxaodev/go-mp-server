@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 
 	"github.com/bruxaodev/go-mp-sdk/pkg/server"
-	"github.com/quic-go/quic-go"
 )
 
 type Client struct {
@@ -14,7 +13,7 @@ type Client struct {
 	Room     string
 }
 
-func NewClient(conn *quic.Conn) *Client {
+func NewClient(conn *server.Conn) *Client {
 	return &Client{
 		Client:   server.NewClient(conn),
 		Nickname: "Guest",

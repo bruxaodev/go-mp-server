@@ -25,7 +25,34 @@ type ClientConstraint[T any] interface {
 	ClientInterface
 }
 
-type ClientFactory[T any] func(conn *quic.Conn) T
+type Conn struct {
+	*quic.Conn
+}
+
+func (c *Conn) OpenStream() (*Stream, error) {
+	stream, err := c.Conn.OpenStream()
+	if err != nil {
+		return nil, err
+	}
+	return &Stream{Stream: stream}, nil
+}
+
+func (c *Conn) SendDatagram(data []byte) error {
+	return c.Conn.SendDatagram(data)
+}
+
+func (c *Conn) AcceptStream(ctx context.Context) (*Stream, error) {
+	stream, err := c.Conn.AcceptStream(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &Stream{Stream: stream}, nil
+}
+
+type Stream struct {
+	*quic.Stream
+}
+type ClientFactory[T any] func(conn *Conn) T
 
 type OnConnectFn[T any] func(c T)
 type OnDisconnectFn[T any] func(c T, err error)
@@ -125,11 +152,11 @@ func (s *Server[T, M]) acceptLoop() {
 			}
 		}
 		s.wg.Add(1)
-		go s.handleConnection(conn)
+		go s.handleConnection(&Conn{conn})
 	}
 }
 
-func (s *Server[T, M]) handleConnection(conn *quic.Conn) {
+func (s *Server[T, M]) handleConnection(conn *Conn) {
 	defer s.wg.Done()
 	c := s.ClientFactory(conn)
 	s.conns.Store(conn, c)
@@ -156,7 +183,7 @@ func (s *Server[T, M]) handleConnection(conn *quic.Conn) {
 	}
 }
 
-func (s *Server[T, M]) handleStream(stream *quic.Stream, c T) {
+func (s *Server[T, M]) handleStream(stream *Stream, c T) {
 	defer s.wg.Done()
 	defer stream.Close()
 	data, err := io.ReadAll(stream)
@@ -183,7 +210,7 @@ func (s *Server[T, M]) Broadcast(msg *Message) {
 	}
 	s.conns.Range(func(key, value interface{}) bool {
 		// fmt.Printf("Broadcasting to %v\n", key)
-		conn := key.(*quic.Conn)
+		conn := key.(*Conn)
 		str, err := conn.OpenStream()
 		if err != nil {
 			log.Println("open stream error:", err)
@@ -198,7 +225,7 @@ func (s *Server[T, M]) Broadcast(msg *Message) {
 	})
 }
 
-func (s *Server[T, M]) SendDatagram(conn *quic.Conn, data []byte) error {
+func (s *Server[T, M]) SendDatagram(conn *Conn, data []byte) error {
 	return conn.SendDatagram(data)
 }
 
@@ -238,7 +265,7 @@ func (s *Server[T, M]) GetClients() []T {
 	return clients
 }
 
-func (s *Server[T, M]) GetClientByConn(conn *quic.Conn) (T, bool) {
+func (s *Server[T, M]) GetClientByConn(conn *Conn) (T, bool) {
 	var zero T
 	if value, ok := s.conns.Load(conn); ok {
 		if client, ok := value.(T); ok {

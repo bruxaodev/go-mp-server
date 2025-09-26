@@ -1,12 +1,8 @@
 package server
 
-import (
-	"github.com/quic-go/quic-go"
-)
-
 type ClientInterface interface {
 	GetID() string
-	GetConn() *quic.Conn
+	GetConn() *Conn
 	GetMeta() map[string]interface{}
 	SetID(id string)
 	SetMeta(key string, value interface{})
@@ -14,7 +10,7 @@ type ClientInterface interface {
 
 type Client struct {
 	ID   string
-	Conn *quic.Conn
+	Conn *Conn
 	Meta map[string]interface{}
 }
 
@@ -22,7 +18,7 @@ func (c *Client) GetID() string {
 	return c.ID
 }
 
-func (c *Client) GetConn() *quic.Conn {
+func (c *Client) GetConn() *Conn {
 	return c.Conn
 }
 
@@ -41,7 +37,7 @@ func (c *Client) SetMeta(key string, value interface{}) {
 	c.Meta[key] = value
 }
 
-func NewClient(conn *quic.Conn) *Client {
+func NewClient(conn *Conn) *Client {
 	return &Client{
 		ID:   "",
 		Conn: conn,

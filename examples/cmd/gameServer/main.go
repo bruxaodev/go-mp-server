@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 
 	"github.com/bruxaodev/go-mp-sdk/pkg/server"
-	"github.com/quic-go/quic-go"
 )
 
 type Point3D struct {
@@ -18,7 +17,7 @@ type Player struct {
 	Inventory []string
 }
 
-func ClientFactory(conn *quic.Conn) *Player {
+func ClientFactory(conn *server.Conn) *Player {
 	return &Player{
 		Client:    server.NewClient(conn),
 		Health:    100,
@@ -33,6 +32,7 @@ const (
 	MessageTypeMove   TypeMessages = "move"
 	MessageTypeAttack TypeMessages = "attack"
 	MessageTypeChat   TypeMessages = "chat"
+	MessageTypePing   TypeMessages = "ping"
 )
 
 type Message struct {
@@ -66,9 +66,26 @@ func main() {
 
 		case MessageTypeChat:
 
+		case MessageTypePing:
+			str, err := c.GetConn().OpenStream()
+			if err != nil {
+				println("Error opening stream:", err.Error())
+				return
+			}
+			d, _ := json.Marshal(msg)
+			_, err = str.Write(d)
+			if err != nil {
+				println("Error writing to stream:", err.Error())
+			}
+			str.Close()
+
 		default:
 			println("Unknown message type:", msg.Type)
 		}
+	}
+	s.TickFn = func(s *server.Server[*Player, *Message]) {
+		// Game loop logic here
+		s.Broadcast(&server.Message{Type: "tick", Data: nil})
 	}
 	s.Start()
 	defer s.Stop()
