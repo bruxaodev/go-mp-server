@@ -27,14 +27,22 @@ func ClientFactory(conn *quic.Conn) *Player {
 	}
 }
 
+type TypeMessages string
+
+const (
+	MessageTypeMove   TypeMessages = "move"
+	MessageTypeAttack TypeMessages = "attack"
+	MessageTypeChat   TypeMessages = "chat"
+)
+
 type Message struct {
-	Type string          `json:"type"`
+	Type TypeMessages    `json:"type"`
 	Data json.RawMessage `json:"data"`
 }
 
 func MessageFactory(msg *server.Message) *Message {
 	return &Message{
-		Type: msg.Type,
+		Type: TypeMessages(msg.Type),
 		Data: msg.Data,
 	}
 }
@@ -51,7 +59,16 @@ func main() {
 		println("Client disconnected:", c.GetID(), "error:", err.Error())
 	}
 	s.OnMsg = func(c *Player, msg *Message) {
-		println("Received message from", c.GetID(), "type:", msg.Type)
+		switch msg.Type {
+		case MessageTypeMove:
+
+		case MessageTypeAttack:
+
+		case MessageTypeChat:
+
+		default:
+			println("Unknown message type:", msg.Type)
+		}
 	}
 	s.Start()
 	defer s.Stop()

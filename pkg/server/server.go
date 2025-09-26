@@ -4,8 +4,8 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
-	"fmt"
 	"io"
+	"log"
 	"net"
 	"sync"
 	"time"
@@ -86,7 +86,7 @@ func (s *Server[T, M]) Start() {
 	go s.acceptLoop()
 	s.wg.Add(1)
 	go s.tickLoop()
-	fmt.Printf("Server started, listening on %s\n", s.ln.Addr().String())
+	log.Printf("Server started, listening on %s\n", s.ln.Addr().String())
 }
 
 func (s *Server[T, M]) Stop() {
@@ -120,7 +120,7 @@ func (s *Server[T, M]) acceptLoop() {
 			case <-s.ctx.Done():
 				return
 			default:
-				fmt.Println("accept error:", err)
+				log.Println("accept error:", err)
 				continue
 			}
 		}
@@ -144,7 +144,7 @@ func (s *Server[T, M]) handleConnection(conn *quic.Conn) {
 	for {
 		stream, err := conn.AcceptStream(ctx)
 		if err != nil {
-			fmt.Println("stream accept error:", err)
+			log.Println("stream accept error:", err)
 			if s.OnDisc != nil {
 				s.OnDisc(c, err)
 			}
@@ -161,16 +161,15 @@ func (s *Server[T, M]) handleStream(stream *quic.Stream, c T) {
 	defer stream.Close()
 	data, err := io.ReadAll(stream)
 	if err != nil {
-		fmt.Println("read stream error:", err)
+		log.Println("read stream error:", err)
 		return
 	}
 	var baseMsg Message
 	if err := json.Unmarshal(data, &baseMsg); err != nil {
-		fmt.Println("unmarshal message error:", err)
+		log.Println("unmarshal message error:", err)
 		return
 	}
 	msg := s.MessageFactory(&baseMsg)
-	fmt.Printf("Received message: %+v\n", msg)
 	if s.OnMsg != nil {
 		s.OnMsg(c, msg)
 	}
@@ -179,7 +178,7 @@ func (s *Server[T, M]) handleStream(stream *quic.Stream, c T) {
 func (s *Server[T, M]) Broadcast(msg *Message) {
 	data, err := json.Marshal(msg)
 	if err != nil {
-		fmt.Println("marshal message error:", err)
+		log.Println("marshal message error:", err)
 		return
 	}
 	s.conns.Range(func(key, value interface{}) bool {
@@ -187,12 +186,12 @@ func (s *Server[T, M]) Broadcast(msg *Message) {
 		conn := key.(*quic.Conn)
 		str, err := conn.OpenStream()
 		if err != nil {
-			fmt.Println("open stream error:", err)
+			log.Println("open stream error:", err)
 			return true
 		}
 		_, err = str.Write(data)
 		if err != nil {
-			fmt.Println("write stream error:", err)
+			log.Println("write stream error:", err)
 		}
 		str.Close()
 		return true
