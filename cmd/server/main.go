@@ -22,8 +22,20 @@ func NewClient(conn *quic.Conn) *Client {
 	}
 }
 
+type Message struct {
+	Type string          `json:"type"`
+	Data json.RawMessage `json:"data"`
+}
+
+func NewMessage(msg *server.Message) *Message {
+	return &Message{
+		Type: msg.Type,
+		Data: msg.Data,
+	}
+}
+
 func main() {
-	s, err := server.New("localhost:8888", 60, NewClient)
+	s, err := server.New("localhost:8888", 60, NewClient, NewMessage)
 	if err != nil {
 		panic(err)
 	}
@@ -36,7 +48,7 @@ func main() {
 		println("Client disconnected:", c.GetID(), "error:", err.Error())
 	}
 
-	s.OnMsg = func(c *Client, msg *server.Message) {
+	s.OnMsg = func(c *Client, msg *Message) {
 		println("Received message from", c.GetID(), "type:", msg.Type)
 		str, err := c.GetConn().OpenStream()
 		if err != nil {
