@@ -18,19 +18,31 @@ type Message struct {
 	Data json.RawMessage `json:"data"`
 }
 
-type OnConnectFn func(c *Client)
-type OnDisconnectFn func(c *Client, err error)
-type OnMessageFn func(c *Client, msg *Message)
-type TickFn func(s *Server)
+// ClientConstraint define que tipos podem ser usados como client
+// T deve ser um pointer para um tipo que implementa ClientInterface
+type ClientConstraint[T any] interface {
+	*T
+	ClientInterface
+}
 
-type Server struct {
+// Factory function type para criar novos clients
+type ClientFactory[T any] func(conn *quic.Conn) T
+
+// Callback functions agora são genéricas
+type OnConnectFn[T any] func(c T)
+type OnDisconnectFn[T any] func(c T, err error)
+type OnMessageFn[T any] func(c T, msg *Message)
+type TickFn[T any] func(s *Server[T])
+
+type Server[T any] struct {
 	ln    quic.Listener
-	conns sync.Map
+	conns sync.Map // key: *quic.Conn, value: T
 
-	OnConn OnConnectFn
-	OnDisc OnDisconnectFn
-	OnMsg  OnMessageFn
-	TickFn TickFn
+	ClientFactory ClientFactory[T]
+	OnConn        OnConnectFn[T]
+	OnDisc        OnDisconnectFn[T]
+	OnMsg         OnMessageFn[T]
+	TickFn        TickFn[T]
 
 	tps    time.Duration
 	ctx    context.Context
@@ -38,7 +50,7 @@ type Server struct {
 	cancel context.CancelFunc
 }
 
-func New(addr string, tickRate int) (*Server, error) {
+func New[T any](addr string, tickRate int, factory ClientFactory[T]) (*Server[T], error) {
 	udpAddr, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
 		return nil, err
@@ -59,13 +71,14 @@ func New(addr string, tickRate int) (*Server, error) {
 
 	t := time.Second / time.Duration(tickRate)
 
-	return &Server{
-		ln:  *ln,
-		tps: t,
+	return &Server[T]{
+		ln:            *ln,
+		tps:           t,
+		ClientFactory: factory,
 	}, nil
 }
 
-func (s *Server) Start() {
+func (s *Server[T]) Start() {
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
 	s.ctx = ctx
@@ -76,13 +89,13 @@ func (s *Server) Start() {
 	fmt.Printf("Server started, listening on %s\n", s.ln.Addr().String())
 }
 
-func (s *Server) Stop() {
+func (s *Server[T]) Stop() {
 	s.cancel()
 	s.ln.Close()
 	s.wg.Wait()
 }
 
-func (s *Server) tickLoop() {
+func (s *Server[T]) tickLoop() {
 	defer s.wg.Done()
 	ticker := time.NewTicker(s.tps)
 	defer ticker.Stop()
@@ -98,7 +111,7 @@ func (s *Server) tickLoop() {
 	}
 }
 
-func (s *Server) acceptLoop() {
+func (s *Server[T]) acceptLoop() {
 	defer s.wg.Done()
 	for {
 		conn, err := s.ln.Accept(s.ctx)
@@ -116,21 +129,15 @@ func (s *Server) acceptLoop() {
 	}
 }
 
-func (s *Server) handleConnection(conn *quic.Conn) {
+func (s *Server[T]) handleConnection(conn *quic.Conn) {
 	defer s.wg.Done()
-	c := &Client{
-		ID:   conn.RemoteAddr().String(),
-		Conn: conn,
-		Meta: make(map[string]interface{}),
-	}
+	c := s.ClientFactory(conn)
 	s.conns.Store(conn, c)
 
 	if s.OnConn != nil {
-		c, ok := s.conns.Load(conn)
-		if ok {
-			s.OnConn(c.(*Client))
-		}
+		s.OnConn(c)
 	}
+
 	ctx, cancel := context.WithCancel(s.ctx)
 	defer cancel()
 
@@ -139,10 +146,7 @@ func (s *Server) handleConnection(conn *quic.Conn) {
 		if err != nil {
 			fmt.Println("stream accept error:", err)
 			if s.OnDisc != nil {
-				c, ok := s.conns.Load(conn)
-				if ok {
-					s.OnDisc(c.(*Client), err)
-				}
+				s.OnDisc(c, err)
 			}
 			s.conns.Delete(conn)
 			return
@@ -152,7 +156,7 @@ func (s *Server) handleConnection(conn *quic.Conn) {
 	}
 }
 
-func (s *Server) handleStream(stream *quic.Stream, c *Client) {
+func (s *Server[T]) handleStream(stream *quic.Stream, c T) {
 	defer s.wg.Done()
 	defer stream.Close()
 	data, err := io.ReadAll(stream)
@@ -172,7 +176,7 @@ func (s *Server) handleStream(stream *quic.Stream, c *Client) {
 	// s.Broadcast(&msg)
 }
 
-func (s *Server) Broadcast(msg *Message) {
+func (s *Server[T]) Broadcast(msg *Message) {
 	data, err := json.Marshal(msg)
 	if err != nil {
 		fmt.Println("marshal message error:", err)
@@ -195,7 +199,7 @@ func (s *Server) Broadcast(msg *Message) {
 	})
 }
 
-func (s *Server) SendDatagram(conn *quic.Conn, data []byte) error {
+func (s *Server[T]) SendDatagram(conn *quic.Conn, data []byte) error {
 	return conn.SendDatagram(data)
 }
 
@@ -211,4 +215,31 @@ func GenerateTLSConfig() *tls.Config {
 	return &tls.Config{
 		Certificates: []tls.Certificate{c},
 	}
+}
+
+// NewDefaultServer cria um servidor usando o client padrão
+func NewDefaultServer(addr string, tickRate int) (*Server[*Client], error) {
+	return New(addr, tickRate, NewClient)
+}
+
+// Funções auxiliares para trabalhar com clients
+func (s *Server[T]) GetClients() []T {
+	var clients []T
+	s.conns.Range(func(key, value interface{}) bool {
+		if client, ok := value.(T); ok {
+			clients = append(clients, client)
+		}
+		return true
+	})
+	return clients
+}
+
+func (s *Server[T]) GetClientByConn(conn *quic.Conn) (T, bool) {
+	var zero T
+	if value, ok := s.conns.Load(conn); ok {
+		if client, ok := value.(T); ok {
+			return client, true
+		}
+	}
+	return zero, false
 }
