@@ -84,8 +84,9 @@ func main() {
 		}
 	}
 	s.TickFn = func(s *server.Server[*Player, *Message]) {
-		// Game loop logic here
-		s.Broadcast(&server.Message{Type: "tick", Data: nil})
+		// Game loop logic here - usar BroadcastDatagram para mensagens frequentes
+		tickData := []byte(`{"type":"tick","data":null}`)
+		s.BroadcastDatagram(tickData)
 	}
 	s.Start()
 	defer s.Stop()

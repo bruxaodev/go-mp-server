@@ -61,7 +61,7 @@ type TickFn[T, M any] func(s *Server[T, M])
 
 type Server[T, M any] struct {
 	ln    quic.Listener
-	conns sync.Map // key: *quic.Conn, value: T
+	conns sync.Map // key: *Conn, value: T
 
 	ClientFactory  ClientFactory[T]
 	MessageFactory MessageFactory[M]
@@ -88,8 +88,14 @@ func New[T, M any](addr string, tickRate int, clientFactory ClientFactory[T], me
 	tr := &quic.Transport{Conn: udpConn}
 	tlsConf := GenerateTLSConfig()
 	ln, err := tr.Listen(tlsConf, &quic.Config{
-		EnableDatagrams: true,
-		MaxIdleTimeout:  5 * time.Minute,
+		EnableDatagrams:                true,
+		MaxIdleTimeout:                 5 * time.Minute,
+		MaxIncomingStreams:             1000, // Aumentar limite de streams
+		MaxIncomingUniStreams:          1000,
+		InitialStreamReceiveWindow:     512 * 1024,  // 512KB
+		MaxStreamReceiveWindow:         1024 * 1024, // 1MB
+		InitialConnectionReceiveWindow: 1024 * 1024, // 1MB
+		MaxConnectionReceiveWindow:     1024 * 1024, // 1MB
 	})
 	if err != nil {
 		return nil, err
@@ -209,24 +215,67 @@ func (s *Server[T, M]) Broadcast(msg *Message) {
 		return
 	}
 	s.conns.Range(func(key, value interface{}) bool {
-		// fmt.Printf("Broadcasting to %v\n", key)
 		conn := key.(*Conn)
-		str, err := conn.OpenStream()
+		// Usar datagramas em vez de streams para broadcasts
+		err := conn.SendDatagram(data)
 		if err != nil {
-			log.Println("open stream error:", err)
-			return true
+			log.Println("send datagram error:", err)
 		}
-		_, err = str.Write(data)
-		if err != nil {
-			log.Println("write stream error:", err)
-		}
-		str.Close()
+		return true
+	})
+}
+
+// BroadcastStream usa streams para mensagens que precisam de entrega garantida
+func (s *Server[T, M]) BroadcastStream(msg *Message) {
+	data, err := json.Marshal(msg)
+	if err != nil {
+		log.Println("marshal message error:", err)
+		return
+	}
+
+	// Usar um semáforo para limitar streams concorrentes
+	semaphore := make(chan struct{}, 10) // Máximo 10 streams concorrentes
+
+	s.conns.Range(func(key, value interface{}) bool {
+		conn := key.(*Conn)
+
+		// Adquirir permissão
+		semaphore <- struct{}{}
+
+		go func(c *Conn) {
+			defer func() { <-semaphore }() // Liberar permissão
+
+			str, err := c.OpenStream()
+			if err != nil {
+				log.Println("open stream error:", err)
+				return
+			}
+			defer str.Close()
+
+			_, err = str.Write(data)
+			if err != nil {
+				log.Println("write stream error:", err)
+			}
+		}(conn)
+
 		return true
 	})
 }
 
 func (s *Server[T, M]) SendDatagram(conn *Conn, data []byte) error {
 	return conn.SendDatagram(data)
+}
+
+// BroadcastDatagram envia dados via datagramas para todos os clientes (mais eficiente)
+func (s *Server[T, M]) BroadcastDatagram(data []byte) {
+	s.conns.Range(func(key, value interface{}) bool {
+		conn := key.(*Conn)
+		err := conn.SendDatagram(data)
+		if err != nil {
+			log.Println("send datagram error:", err)
+		}
+		return true
+	})
 }
 
 func GenerateTLSConfig() *tls.Config {
