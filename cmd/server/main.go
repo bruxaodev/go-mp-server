@@ -1,62 +1,41 @@
 package main
 
 import (
-	"fmt"
+	"encoding/json"
 
 	"github.com/bruxaodev/go-mp-sdk/pkg/server"
-	"github.com/quic-go/quic-go"
-	"github.com/vmihailenco/msgpack/v5"
 )
 
 func main() {
-	serverAddress := "localhost:8888" // Porta 8888
-	tlsCof := server.GenerateTLSConfig()
-	srv := server.NewServer(serverAddress, tlsCof, 60) // Porta 8888
-	defer srv.Stop()
-
-	srv.OnConnectFn = func(p *server.Client) {
-		fmt.Println("Client connected:", p.ID)
-		srv.SendTo(p.ID, map[string]interface{}{"msg": "Welcome!"})
+	s, err := server.New("localhost:8888", 60)
+	if err != nil {
+		panic(err)
 	}
 
-	srv.OnDisconnectFn = func(p *server.Client, err error) {
-		fmt.Println("Client disconnected:", p.ID, "error:", err)
+	s.OnConn = func(c *server.Client) {
+		println("Client connected:", c.ID)
 	}
 
-	srv.OnMessageFn = func(p *server.Client, msg *server.Message, stream *quic.Stream) {
-		fmt.Printf("Received message from %s, type: %s, data: %+v\n", p.ID, msg.Type, msg.Data)
-		if msg.Type == "ping" {
-			// Responder no mesmo stream
-			response := map[string]interface{}{
-				"t": "pong",
-				"d": map[string]interface{}{"from": p.ID},
-			}
-			fmt.Printf("Enviando resposta: %+v\n", response)
+	s.OnDisc = func(c *server.Client, err error) {
+		println("Client disconnected:", c.ID, "error:", err)
+	}
 
-			// Serializar resposta
-			b, err := msgpack.Marshal(response)
-			if err != nil {
-				fmt.Printf("Erro ao serializar resposta: %v\n", err)
-				return
-			}
-
-			// Enviar no mesmo stream
-			_, err = stream.Write(b)
-			if err != nil {
-				fmt.Printf("Erro ao escrever resposta no stream: %v\n", err)
-			} else {
-				fmt.Printf("Resposta de %d bytes enviada no mesmo stream\n", len(b))
-			}
+	s.OnMsg = func(c *server.Client, msg *server.Message) {
+		println("Received message from", c.ID, "type:", msg.Type)
+		str, err := c.Conn.OpenStream()
+		if err != nil {
+			println("Error opening stream:", err.Error())
+			return
 		}
-	}
 
-	if err := srv.Start(); err != nil {
-		fmt.Println("Error starting server:", err)
-		return
+		d, _ := json.Marshal(msg)
+		_, err = str.Write(d)
+		if err != nil {
+			println("Error writing to stream:", err.Error())
+		}
+		str.Close()
 	}
-	fmt.Println("Server started on ", serverAddress)
-
-	// Block forever
+	s.Start()
+	defer s.Stop()
 	select {}
-
 }

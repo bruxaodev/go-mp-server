@@ -3,191 +3,200 @@ package server
 import (
 	"context"
 	"crypto/tls"
-	"errors"
+	"encoding/json"
+	"fmt"
 	"io"
+	"net"
 	"sync"
 	"time"
 
 	"github.com/quic-go/quic-go"
-	"github.com/vmihailenco/msgpack/v5"
 )
 
 type Message struct {
-	Type string      `msgpack:"t"`
-	Data interface{} `msgpack:"d"`
+	Type string          `json:"type"`
+	Data json.RawMessage `json:"data"`
 }
 
-type OnConnectFn func(p *Client)
-type OnDisconnectFn func(p *Client, err error)
-type OnMessageFn func(p *Client, msg *Message, stream *quic.Stream)
+type OnConnectFn func(c *Client)
+type OnDisconnectFn func(c *Client, err error)
+type OnMessageFn func(c *Client, msg *Message)
+type TickFn func(s *Server)
 
 type Server struct {
-	Addr         string
-	tslConfig    *tls.Config
-	listner      *quic.Listener
-	clients      map[string]*Client
-	clientsMutex sync.RWMutex
+	ln    quic.Listener
+	conns sync.Map
 
-	OnConnectFn    OnConnectFn
-	OnDisconnectFn OnDisconnectFn
-	OnMessageFn    OnMessageFn
+	OnConn OnConnectFn
+	OnDisc OnDisconnectFn
+	OnMsg  OnMessageFn
+	TickFn TickFn
 
-	tickInterfal time.Duration
-	ctx          context.Context
-	cancel       context.CancelFunc
-	wg           sync.WaitGroup
+	tps    time.Duration
+	ctx    context.Context
+	wg     sync.WaitGroup
+	cancel context.CancelFunc
 }
 
-func NewServer(addr string, tlsConf *tls.Config, ticksPerSec int) *Server {
-	ctx, cancel := context.WithCancel(context.Background())
-	interval := time.Second / time.Duration(ticksPerSec)
-	return &Server{
-		Addr:         addr,
-		tslConfig:    tlsConf,
-		clients:      make(map[string]*Client),
-		tickInterfal: interval,
-		ctx:          ctx,
-		cancel:       cancel,
-	}
-}
-
-func (s *Server) Start() error {
-	ln, err := quic.ListenAddr(s.Addr, s.tslConfig, nil)
+func New(addr string, tickRate int) (*Server, error) {
+	udpAddr, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	udpConn, err := net.ListenUDP("udp", udpAddr)
+	if err != nil {
+		return nil, err
+	}
+	tr := &quic.Transport{Conn: udpConn}
+	tlsConf := GenerateTLSConfig()
+	ln, err := tr.Listen(tlsConf, &quic.Config{
+		EnableDatagrams: true,
+		MaxIdleTimeout:  5 * time.Minute,
+	})
+	if err != nil {
+		return nil, err
 	}
 
-	s.listner = ln
+	t := time.Second / time.Duration(tickRate)
+
+	return &Server{
+		ln:  *ln,
+		tps: t,
+	}, nil
+}
+
+func (s *Server) Start() {
+	ctx, cancel := context.WithCancel(context.Background())
+	s.cancel = cancel
+	s.ctx = ctx
 	s.wg.Add(1)
 	go s.acceptLoop()
 	s.wg.Add(1)
 	go s.tickLoop()
-
-	return nil
+	fmt.Printf("Server started, listening on %s\n", s.ln.Addr().String())
 }
 
-func (s *Server) acceptLoop() {
-	defer s.wg.Done()
-	for {
-		conn, err := s.listner.Accept(s.ctx)
-		if err != nil {
-
-			select {
-			case <-s.ctx.Done():
-				return
-			default:
-			}
-			continue
-
-		}
-		s.wg.Add(1)
-		go s.handleConn(conn)
-	}
-}
-
-func (s *Server) handleConn(conn *quic.Conn) {
-	defer s.wg.Done()
-	peer := conn.RemoteAddr().String()
-	client := &Client{
-		ID:      peer,
-		Conn:    conn,
-		Streams: make(map[uint64]quic.Stream),
-		Meta:    make(map[string]interface{}),
-	}
-
-	s.clientsMutex.Lock()
-	s.clients[client.ID] = client
-	s.clientsMutex.Unlock()
-
-	if s.OnConnectFn != nil {
-		s.OnConnectFn(client)
-	}
-
-	streamCtx, cancel := context.WithCancel(s.ctx)
-	defer cancel()
-
-	for {
-		stream, err := conn.AcceptStream(streamCtx)
-		if err != nil {
-			s.clientsMutex.Lock()
-			delete(s.clients, client.ID)
-			s.clientsMutex.Unlock()
-			if s.OnDisconnectFn != nil {
-				s.OnDisconnectFn(client, err)
-			}
-			return
-		}
-
-		s.wg.Add(1)
-		go func(st *quic.Stream) {
-			defer s.wg.Done()
-			// Ler mensagem de forma mais eficiente
-			data, err := io.ReadAll(st)
-			if err != nil {
-				st.Close()
-				return
-			}
-			
-			var msg Message
-			if err := msgpack.Unmarshal(data, &msg); err != nil {
-				st.Close()
-				return
-			}
-			if s.OnMessageFn != nil {
-				s.OnMessageFn(client, &msg, st)
-			}
-			// Fechar stream após callback
-			st.Close()
-		}(stream)
-	}
-}
-
-func (s *Server) Broadcast(v interface{}) {
-	s.clientsMutex.RLock()
-	defer s.clientsMutex.RUnlock()
-	for _, p := range s.clients {
-		pLocal := p
-		go func() {
-			_ = pLocal.SendPacked(context.Background(), v)
-		}()
-	}
-}
-
-func (s *Server) SendTo(clientID string, v interface{}) error {
-	s.clientsMutex.RLock()
-	p, ok := s.clients[clientID]
-	s.clientsMutex.RUnlock()
-	if !ok {
-		return errors.New("client not found")
-	}
-	return p.SendPacked(context.Background(), v)
+func (s *Server) Stop() {
+	s.cancel()
+	s.ln.Close()
+	s.wg.Wait()
 }
 
 func (s *Server) tickLoop() {
 	defer s.wg.Done()
-	ticker := time.NewTicker(s.tickInterfal)
+	ticker := time.NewTicker(s.tps)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-s.ctx.Done():
 			return
 		case <-ticker.C:
-
+			if s.TickFn != nil {
+				s.TickFn(s)
+			}
 		}
 	}
 }
 
-func (s *Server) Stop() error {
-	s.cancel()
-	s.listner.Close()
-
-	s.clientsMutex.RLock()
-	for _, p := range s.clients {
-		p.Conn.CloseWithError(0, "server stopping")
+func (s *Server) acceptLoop() {
+	defer s.wg.Done()
+	for {
+		conn, err := s.ln.Accept(s.ctx)
+		if err != nil {
+			select {
+			case <-s.ctx.Done():
+				return
+			default:
+				fmt.Println("accept error:", err)
+				continue
+			}
+		}
+		s.wg.Add(1)
+		go s.handleConnection(conn)
 	}
-	s.clientsMutex.RUnlock()
-	s.wg.Wait()
-	return nil
+}
+
+func (s *Server) handleConnection(conn *quic.Conn) {
+	defer s.wg.Done()
+	c := &Client{
+		ID:   conn.RemoteAddr().String(),
+		Conn: conn,
+		Meta: make(map[string]interface{}),
+	}
+	s.conns.Store(conn, c)
+
+	if s.OnConn != nil {
+		c, ok := s.conns.Load(conn)
+		if ok {
+			s.OnConn(c.(*Client))
+		}
+	}
+	ctx, cancel := context.WithCancel(s.ctx)
+	defer cancel()
+
+	for {
+		stream, err := conn.AcceptStream(ctx)
+		if err != nil {
+			fmt.Println("stream accept error:", err)
+			if s.OnDisc != nil {
+				c, ok := s.conns.Load(conn)
+				if ok {
+					s.OnDisc(c.(*Client), err)
+				}
+			}
+			s.conns.Delete(conn)
+			return
+		}
+		s.wg.Add(1)
+		go s.handleStream(stream, c)
+	}
+}
+
+func (s *Server) handleStream(stream *quic.Stream, c *Client) {
+	defer s.wg.Done()
+	defer stream.Close()
+	data, err := io.ReadAll(stream)
+	if err != nil {
+		fmt.Println("read stream error:", err)
+		return
+	}
+	var msg Message
+	if err := json.Unmarshal(data, &msg); err != nil {
+		fmt.Println("unmarshal message error:", err)
+		return
+	}
+	fmt.Printf("Received message: %+v\n", msg)
+	if s.OnMsg != nil {
+		s.OnMsg(c, &msg)
+	}
+	// s.Broadcast(&msg)
+}
+
+func (s *Server) Broadcast(msg *Message) {
+	data, err := json.Marshal(msg)
+	if err != nil {
+		fmt.Println("marshal message error:", err)
+		return
+	}
+	s.conns.Range(func(key, value interface{}) bool {
+		// fmt.Printf("Broadcasting to %v\n", key)
+		conn := key.(*quic.Conn)
+		str, err := conn.OpenStream()
+		if err != nil {
+			fmt.Println("open stream error:", err)
+			return true
+		}
+		_, err = str.Write(data)
+		if err != nil {
+			fmt.Println("write stream error:", err)
+		}
+		str.Close()
+		return true
+	})
+}
+
+func (s *Server) SendDatagram(conn *quic.Conn, data []byte) error {
+	return conn.SendDatagram(data)
 }
 
 func GenerateTLSConfig() *tls.Config {
